@@ -79,6 +79,7 @@ exports.handler = async (event, context) => {
           canvas { 
             max-width: 100%; 
             height: auto; 
+            display: block;
           }
           .loading {
             text-align: center;
@@ -87,14 +88,8 @@ exports.handler = async (event, context) => {
             color: #666;
           }
           .linkLayer {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            pointer-events: none;
-            padding: 20px;
             position: relative;
+            pointer-events: none;
           }
           .linkLayer a {
             position: absolute;
@@ -135,6 +130,52 @@ exports.handler = async (event, context) => {
 
           function updateZoomLevel() {
             document.getElementById('zoomLevel').textContent = \`\${Math.round(scale * 100)}%\`;
+          }
+
+          function decodePdfString(value) {
+            if (!value) return '';
+
+            const text = String(value);
+            if (!text.startsWith('\\u00fe\\u00ff')) return text;
+
+            let decoded = '';
+            for (let i = 2; i + 1 < text.length; i += 2) {
+              decoded += String.fromCharCode((text.charCodeAt(i) << 8) | text.charCodeAt(i + 1));
+            }
+            return decoded;
+          }
+
+          function normalizeUrl(value) {
+            if (!value) return null;
+
+            const url = String(value).trim();
+            if (/^https?:/i.test(url)) return url;
+            if (/^9shi\\.cc\\//i.test(url)) return 'https://' + url;
+            return null;
+          }
+
+          function extractUrls(value) {
+            const decoded = decodePdfString(value);
+            const matches = decoded.match(/(?:https?:\\/\\/)?9shi\\.cc\\/[A-Za-z0-9]+/gi) || [];
+            return matches.map(normalizeUrl).filter(Boolean);
+          }
+
+          function resolveAnnotationUrl(link, unsafeUrlUseCounts) {
+            const sourceUrl = String(link.url || '');
+            const sourceUrls = extractUrls(sourceUrl);
+            if (sourceUrls.length) {
+              const index = unsafeUrlUseCounts.get(sourceUrl) || 0;
+              unsafeUrlUseCounts.set(sourceUrl, index + 1);
+              return sourceUrls[Math.min(index, sourceUrls.length - 1)];
+            }
+
+            const unsafeUrl = String(link.unsafeUrl || '');
+            const urls = extractUrls(unsafeUrl);
+            if (!urls.length) return null;
+
+            const index = unsafeUrlUseCounts.get(unsafeUrl) || 0;
+            unsafeUrlUseCounts.set(unsafeUrl, index + 1);
+            return urls[Math.min(index, urls.length - 1)];
           }
 
           async function downloadPDF() {
@@ -183,18 +224,23 @@ exports.handler = async (event, context) => {
               }).promise;
 
               const annotations = await page.getAnnotations();
+              const unsafeUrlUseCounts = new Map();
               annotations
-                .filter(a => a.subtype === 'Link' && a.url)
+                .filter(a => a.subtype === 'Link')
                 .forEach(link => {
+                  const href = resolveAnnotationUrl(link, unsafeUrlUseCounts);
+                  if (!href) return;
+
                   const linkElement = document.createElement('a');
-                  linkElement.href = link.url;
+                  linkElement.href = href;
                   linkElement.target = '_blank';
+                  linkElement.rel = 'noopener noreferrer';
                   
                   const rect = viewport.convertToViewportRectangle(link.rect);
                   const [x1, y1, x2, y2] = rect;
                   
                   linkElement.style.left = \`\${Math.min(x1, x2)}px\`;
-                  linkElement.style.top = \`\${Math.max(y1, y2)}px\`;
+                  linkElement.style.top = \`\${Math.min(y1, y2)}px\`;
                   linkElement.style.width = \`\${Math.abs(x2 - x1)}px\`;
                   linkElement.style.height = \`\${Math.abs(y2 - y1)}px\`;
                   
