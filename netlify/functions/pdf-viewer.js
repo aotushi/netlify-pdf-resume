@@ -178,6 +178,49 @@ exports.handler = async (event, context) => {
             return urls[Math.min(index, urls.length - 1)];
           }
 
+          function comparableUrl(href) {
+            return String(href).replace(/^https?:\\/\\//i, '').toLowerCase();
+          }
+
+          function appendLinkElement(linkLayer, href, rect) {
+            const linkElement = document.createElement('a');
+            linkElement.href = href;
+            linkElement.target = '_blank';
+            linkElement.rel = 'noopener noreferrer';
+            
+            const [x1, y1, x2, y2] = rect;
+            
+            linkElement.style.left = \`\${Math.min(x1, x2)}px\`;
+            linkElement.style.top = \`\${Math.min(y1, y2)}px\`;
+            linkElement.style.width = \`\${Math.abs(x2 - x1)}px\`;
+            linkElement.style.height = \`\${Math.abs(y2 - y1)}px\`;
+            
+            linkLayer.appendChild(linkElement);
+          }
+
+          async function appendMissingTextLinks(page, viewport, linkLayer, renderedUrls) {
+            const textContent = await page.getTextContent();
+
+            textContent.items.forEach(item => {
+              const text = String(item.str || '').trim();
+              const urls = extractUrls(text);
+              if (urls.length !== 1) return;
+
+              const href = urls[0];
+              const displayUrl = href.replace(/^https?:\\/\\//i, '');
+              if (text !== displayUrl || renderedUrls.has(comparableUrl(href))) return;
+
+              const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
+              const width = item.width * scale;
+              const height = Math.abs(transform[3]) || item.height * scale;
+              const left = transform[4];
+              const top = Math.min(transform[5], transform[5] + transform[3]);
+
+              appendLinkElement(linkLayer, href, [left, top, left + width, top + height]);
+              renderedUrls.add(comparableUrl(href));
+            });
+          }
+
           async function downloadPDF() {
             try {
               const response = await fetch("${pdfUrl}");
@@ -225,27 +268,19 @@ exports.handler = async (event, context) => {
 
               const annotations = await page.getAnnotations();
               const unsafeUrlUseCounts = new Map();
+              const renderedUrls = new Set();
               annotations
                 .filter(a => a.subtype === 'Link')
                 .forEach(link => {
                   const href = resolveAnnotationUrl(link, unsafeUrlUseCounts);
                   if (!href) return;
 
-                  const linkElement = document.createElement('a');
-                  linkElement.href = href;
-                  linkElement.target = '_blank';
-                  linkElement.rel = 'noopener noreferrer';
-                  
                   const rect = viewport.convertToViewportRectangle(link.rect);
-                  const [x1, y1, x2, y2] = rect;
-                  
-                  linkElement.style.left = \`\${Math.min(x1, x2)}px\`;
-                  linkElement.style.top = \`\${Math.min(y1, y2)}px\`;
-                  linkElement.style.width = \`\${Math.abs(x2 - x1)}px\`;
-                  linkElement.style.height = \`\${Math.abs(y2 - y1)}px\`;
-                  
-                  linkLayer.appendChild(linkElement);
+                  appendLinkElement(linkLayer, href, rect);
+                  renderedUrls.add(comparableUrl(href));
                 });
+
+              await appendMissingTextLinks(page, viewport, linkLayer, renderedUrls);
 
               pageRendering = false;
               document.getElementById('page_num').textContent = num;
